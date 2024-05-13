@@ -29,6 +29,7 @@
 
 #include <stdarg.h>
 
+#define CPP 0
 
 // namespace {}
 
@@ -294,6 +295,49 @@ getParameters(cf_filter_data_t *data,
 
   param.paper_is_landscape = (param.page.width > param.page.height);
 
+#if(CPP==0)
+    _cfPDFToPDFPageRect tmp;
+        _cfPDFToPDFPageRect_init(&tmp);
+
+        optGetFloat("page-top", num_options, options, &tmp.top);
+        optGetFloat("page-left", num_options, options, &tmp.left);
+        optGetFloat("page-right", num_options, options, &tmp.right);
+        optGetFloat("page-bottom", num_options, options, &tmp.bottom);
+
+        if((val = cupsGetOption("media-top-margin", num_options, options))
+           != NULL)
+                tmp.top = atof(val) * 72.0 / 2540.0;
+
+        if((val = cupsGetOption("media-left-margin", num_options, options))
+           != NULL)
+                tmp.left = atof(val) * 72.0 / 2540.0;
+
+        if((val = cupsGetOption("media-right-margin", num_options, options))
+           != NULL)
+                tmp.right = atof(val) * 72.0 / 2540.0;
+
+        if((val = cupsGetOption("media-bottom-margin", num_options, options))
+           != NULL)
+                tmp.bottom = atof(val) * 72.0 / 2540.0;
+
+        if((param.orientation == ROT_90) || (param.orientation == ROT_270))
+        {
+                tmp.right = param.page.height - tmp.right;
+                tmp.top = param.page.width - tmp.top;
+                _cfPDFToPDFPageRect_rotate_move(&tmp, param.orientation, param.page.height, param.page.width);
+        }
+        else
+        {
+                tmp.right = param.page.width - tmp.right;
+                tmp.top = param.page.height - tmp.top;
+                _cfPDFToPDFPageRect_rotate_move(&tmp, param.orientation, param.page.width, param.page.height);
+        }
+
+        _cfPDFToPDFPageRect_set(&param.page, &tmp);
+
+#endif
+
+#if(CPP==1)
   _cfPDFToPDFPageRect tmp; // borders (before rotation)
 
   optGetFloat("page-top", num_options, options, &tmp.top);
@@ -330,6 +374,7 @@ getParameters(cf_filter_data_t *data,
 
   param.page.set(tmp); // replace values, where tmp.* != NaN
                        // (because tmp needed rotation, param.page not!)
+#endif
 
   if ((val = cfIPPAttrEnumValForPrinter(printer_attrs, job_attrs, "sides")) !=
       NULL &&
