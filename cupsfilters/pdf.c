@@ -600,11 +600,98 @@ cfPDFWrite(cf_pdf_t *pdf,
 //
 // 'cfPDFFillForm()' - Fill recognized fields with information
 //
+// This function traverses the AcroForm fields in the PDF and sets the value
+// (/V) of each text field whose name (/T) matches a key in the opt list.
+// Returns 0 if at least one field was filled, 1 otherwise.
+//
+
+static int				// O - Number of fields filled
+fill_fields(pdfio_file_t *pdf,		// I - PDF file
+            pdfio_array_t *fields,	// I - Fields array
+            cf_opt_t *opt)		// I - Options linked list
+{
+  int		filled = 0;		// Number of fields filled
+  size_t	i,			// Looping var
+		count;			// Number of fields
+
+  if (!fields)
+    return (0);
+
+  count = pdfioArrayGetSize(fields);
+
+  for (i = 0; i < count; i ++)
+  {
+    pdfio_obj_t		*field_obj;	// Field object
+    pdfio_dict_t	*field_dict;	// Field dictionary
+    pdfio_array_t	*kids;		// Child fields array
+    const char		*field_name;	// Field partial name (/T)
+    cf_opt_t		*cur;		// Current option
+
+    field_obj = pdfioArrayGetObj(fields, i);
+    if (!field_obj)
+      continue;
+
+    field_dict = pdfioObjGetDict(field_obj);
+    if (!field_dict)
+      continue;
+
+    // Recurse into child fields if present
+    kids = pdfioDictGetArray(field_dict, "Kids");
+    if (kids)
+      filled += fill_fields(pdf, kids, opt);
+
+    // Get the field's partial name
+    field_name = pdfioDictGetString(field_dict, "T");
+    if (!field_name)
+      continue;
+
+    // Look for a matching option
+    for (cur = opt; cur; cur = cur->next)
+    {
+      if (strcmp(cur->key, field_name) == 0)
+      {
+        // Set the field value
+        pdfioDictSetString(field_dict, "V", cur->val);
+        filled ++;
+        break;
+      }
+    }
+  }
+
+  return (filled);
+}
 
 int
 cfPDFFillForm(cf_pdf_t *doc, cf_opt_t *opt)
 {
-  // TODO: PDFio does not directly support form filling.
-  return 1;
+  pdfio_file_t	*pdf;			// PDF file
+  pdfio_dict_t	*catalog,		// Document catalog
+		*acroform;		// AcroForm dictionary
+  pdfio_array_t	*fields;		// Fields array
+
+  if (!doc || !opt)
+    return (1);
+
+  pdf = (pdfio_file_t *)doc;
+
+  // Get the AcroForm dictionary from the document catalog
+  catalog = pdfioFileGetCatalog(pdf);
+  if (!catalog)
+    return (1);
+
+  acroform = pdfioDictGetDict(catalog, "AcroForm");
+  if (!acroform)
+    return (1);
+
+  // Get the Fields array
+  fields = pdfioDictGetArray(acroform, "Fields");
+  if (!fields || pdfioArrayGetSize(fields) == 0)
+    return (1);
+
+  // Fill matching fields
+  if (fill_fields(pdf, fields, opt) > 0)
+    return (0);
+
+  return (1);
 }
 
