@@ -430,11 +430,21 @@ cfFilterOptionsCreate(size_t num_options,   // I - Number of command-line option
     ippo->multiple_document_handling = CF_FILTER_HANDLING_COLLATED_COPIES;
   }
 
-  if (get_option("fitplot", num_options, options))
+  if (get_option("fitplot", num_options, options) ||
+      get_option("fit-to-page", num_options, options))
     ippo->print_scaling = CF_FILTER_SCALING_FIT;
 
   if (get_option("fill", num_options, options))
     ippo->print_scaling = CF_FILTER_SCALING_FILL;
+
+  if (get_option("cropfit", num_options, options) ||
+      get_option("crop-to-fit", num_options, options))
+    ippo->print_scaling = CF_FILTER_SCALING_NONE;
+
+  if ((value = get_option("ipp-attribute-fidelity", num_options, options)) != NULL &&
+      (!strcasecmp(value, "true") || !strcasecmp(value, "yes") ||
+       !strcasecmp(value, "on")))
+    ippo->print_scaling = CF_FILTER_SCALING_FIT;
 
   if ((value = get_option("mirror", num_options, options)) != NULL)
   {
@@ -705,7 +715,7 @@ cfFilterOptionsCreate(size_t num_options,   // I - Number of command-line option
     {
       if (!strcmp(value, scalings[i]))
       {
-        ippo->print_scaling = (cf_filter_septype_t)i;
+        ippo->print_scaling = (cf_filter_scaling_t)i;
         break;
       }
     }

@@ -2079,18 +2079,26 @@ copy_page(xform_prepare_t *p,		// I - Preparation data
 
   fprintf(stderr, "DEBUG: iwidth=%g, iheight=%g, cwidth=%g, cheight=%g, rotate=%s\n", iwidth, iheight, cwidth, cheight, rotate ? "true" : "false");
 
-  scaling = cwidth / iwidth;
-  if (p->options->print_scaling == CF_FILTER_SCALING_FILL)
+  if (p->options->print_scaling == CF_FILTER_SCALING_NONE)
   {
-    // Scale to fill...
-    if ((iheight * scaling) < cheight)
-      scaling = cheight / iheight;
+    // "none"/"cropfit" keeps the input page at its original size.
+    scaling = 1.0;
   }
   else
   {
-    // Scale to fit...
-    if ((iheight * scaling) > cheight)
-      scaling = cheight / iheight;
+    scaling = cwidth / iwidth;
+    if (p->options->print_scaling == CF_FILTER_SCALING_FILL)
+    {
+      // Scale to fill.
+      if ((iheight * scaling) < cheight)
+        scaling = cheight / iheight;
+    }
+    else
+    {
+      // AUTO, AUTO_FIT, and FIT scale to fit the output cell.
+      if ((iheight * scaling) > cheight)
+        scaling = cheight / iheight;
+    }
   }
 
  if (rotate && p->options->landscape_orientation_requested_preferred == 5)
