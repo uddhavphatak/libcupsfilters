@@ -628,6 +628,10 @@ prepare_number_up(xform_prepare_t *p)	// I - Preparation data
   pdfio_rect_t	*r;			// Current layout rectangle...
   double	width,			// Width of layout rectangle
 		height;			// Height of layout rectangle
+  bool		first_x,		// Fill cells across rows first?
+    reverse_x,		// Fill columns right-to-left?
+    reverse_y;		// Fill rows bottom-to-top?
+  char		layout_order[5];		// Effective cell order
 
 
   if (!strcmp(p->options->imposition_template, "booklet"))
@@ -701,48 +705,46 @@ prepare_number_up(xform_prepare_t *p)	// I - Preparation data
   // Then arrange the page rectangles evenly across the page...
   width  = (p->crop.x2 - p->crop.x1) / cols;
   height = (p->crop.y2 - p->crop.y1) / rows;
-  
-  switch (p->options->orientation_requested)
+
+  if (p->options->number_up_layout_set)
+    strcpy(layout_order, p->options->number_up_layout);
+  else
   {
-    default : // Portrait or "none"...
-        for (i = 0, r = p->layout; i < p->num_layout; i ++, r ++)
-        {
-          r->x1 = p->crop.x1 + width * (i % cols);
-          r->y1 = p->crop.y1 + height * (rows - 1 - i / cols);
-          r->x2 = r->x1 + width;
-          r->y2 = r->y1 + height;
-        }
+    switch (p->options->orientation_requested)
+    {
+      default:
+        strcpy(layout_order, "lrtb");
         break;
+      case CF_FILTER_ORIENT_LANDSCAPE:
+        strcpy(layout_order, "tbrl");
+        break;
+      case CF_FILTER_ORIENT_REVERSE_PORTRAIT:
+        strcpy(layout_order, "rlbt");
+        break;
+      case CF_FILTER_ORIENT_REVERSE_LANDSCAPE:
+        strcpy(layout_order, "lrbt");
+        break;
+    }
+  }
 
-    case CF_FILTER_ORIENT_LANDSCAPE : // Landscape
-        for (i = 0, r = p->layout; i < p->num_layout; i ++, r ++)
-        {
-          r->x1 = p->crop.x1 + width * (cols - 1 - i / rows);
-          r->y1 = p->crop.y1 + height * (rows - 1 - (i % rows));
-          r->x2 = r->x1 + width;
-          r->y2 = r->y1 + height;
-        }
-        break;
+  first_x = layout_order[0] == 'l' || layout_order[0] == 'r';
+  reverse_x = layout_order[first_x ? 0 : 2] == 'r';
+  reverse_y = layout_order[first_x ? 2 : 0] == 'b';
 
-    case CF_FILTER_ORIENT_REVERSE_PORTRAIT : // Reverse portrait
-        for (i = 0, r = p->layout; i < p->num_layout; i ++, r ++)
-        {
-          r->x1 = p->crop.x1 + width * (cols - 1 - (i % cols));
-          r->y1 = p->crop.y1 + height * (i / cols);
-          r->x2 = r->x1 + width;
-          r->y2 = r->y1 + height;
-        }
-        break;
+  for (i = 0, r = p->layout; i < p->num_layout; i ++, r ++)
+  {
+    size_t x_index = first_x ? i % cols : i / rows;
+    size_t y_index = first_x ? i / cols : i % rows;
 
-    case CF_FILTER_ORIENT_REVERSE_LANDSCAPE : // Reverse landscape
-        for (i = 0, r = p->layout; i < p->num_layout; i ++, r ++)
-        {
-          r->x1 = p->crop.x1 + width * (i / rows);
-          r->y1 = p->crop.y1 + height * (i % rows);
-          r->x2 = r->x1 + width;
-          r->y2 = r->y1 + height;
-        }
-        break;
+    if (reverse_x)
+      x_index = cols - 1 - x_index;
+    if (reverse_y)
+      y_index = rows - 1 - y_index;
+
+    r->x1 = p->crop.x1 + width * x_index;
+    r->y1 = p->crop.y1 + height * (rows - 1 - y_index);
+    r->x2 = r->x1 + width;
+    r->y2 = r->y1 + height;
   }
 }
 
@@ -2060,7 +2062,9 @@ copy_page(xform_prepare_t *p,		// I - Preparation data
   iwidth  = irect.x2 - irect.x1;
   iheight = irect.y2 - irect.y1;
 
-  if ((iwidth > iheight && cwidth < cheight) || (iwidth < iheight && cwidth > cheight))
+  if (p->options->pdf_auto_rotate &&
+      ((iwidth > iheight && cwidth < cheight) ||
+       (iwidth < iheight && cwidth > cheight)))
   {
     // Need to rotate...
     rotate  = true;
@@ -2089,7 +2093,16 @@ copy_page(xform_prepare_t *p,		// I - Preparation data
       scaling = cheight / iheight;
   }
 
- if (rotate)
+ if (rotate && p->options->landscape_orientation_requested_preferred == 5)
+  {
+    cm[0][0] = 0.0;
+    cm[0][1] = scaling;
+    cm[1][0] = -scaling;
+    cm[1][1] = 0.0;
+    cm[2][0] = cell->x2 - 0.5 * (cwidth - iwidth * scaling);
+    cm[2][1] = cell->y1 + 0.5 * (cheight - iheight * scaling);
+  }
+  else if (rotate)
   {
     cm[0][0] = 0.0;
     cm[0][1] = -scaling;
@@ -2776,6 +2789,14 @@ cfFilterPDFToPDF(int inputfd,
   memset(&file, 0, sizeof(file));
 
   filter_options = cfFilterOptionsCreate(data->num_options, data->options);
+
+  if (data->printer_attrs)
+  {
+    ipp_attribute_t *attribute = ippFindAttribute(data->printer_attrs,
+        "landscape-orientation-requested-preferred", IPP_TAG_ZERO);
+    if (attribute && ippGetInteger(attribute, 0) == 5)
+      filter_options->landscape_orientation_requested_preferred = 5;
+  }
 
   // CUPS passes the copy count through the standard "copies" filter argument
   // (argv[4], exposed here as data->copies) and strips the "copies" option

@@ -927,6 +927,10 @@ load_legacy_attributes(
   /* orientation-requested-default */
   ippAddInteger(attrs, IPP_TAG_PRINTER, IPP_TAG_ENUM, "orientation-requested-default", IPP_ORIENT_PORTRAIT);
 
+  /* landscape-orientation-requested-preferred */
+  ippAddInteger(attrs, IPP_TAG_PRINTER, IPP_TAG_ENUM,
+                "landscape-orientation-requested-preferred", IPP_ORIENT_REVERSE_LANDSCAPE);
+
   /* orientation-requested-supported */
   if (cupsArrayFind(docformats, (void *)"application/pdf") || cupsArrayFind(docformats, (void *)"image/jpeg"))
     ippAddIntegers(attrs, IPP_TAG_PRINTER, IPP_TAG_ENUM, "orientation-requested-supported", (int)(sizeof(orientation_requested_supported) / sizeof(orientation_requested_supported[0])), orientation_requested_supported);

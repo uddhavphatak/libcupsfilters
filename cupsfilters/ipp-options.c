@@ -370,11 +370,13 @@ cfFilterOptionsCreate(size_t num_options,   // I - Number of command-line option
   ippo->multiple_document_handling = CF_FILTER_HANDLING_COLLATED_COPIES;
   ippo->print_scaling 		   = CF_FILTER_SCALING_AUTO;
   ippo->number_up                  = 1;
+  cupsCopyString(ippo->number_up_layout, "lrtb", sizeof(ippo->number_up_layout));
   ippo->orientation_requested      = CF_FILTER_ORIENT_NONE;
   ippo->page_set      		   = CF_FILTER_PAGESET_ALL;
   ippo->reverse_order 		   = false;
   ippo->mirror                     = false;
   ippo->pdf_auto_rotate            = false;
+  ippo->landscape_orientation_requested_preferred = 4;
 
   cupsCopyString(ippo->page_border, "none", sizeof(ippo->page_border));
   cupsCopyString(ippo->page_label, "", sizeof(ippo->page_label));
@@ -578,10 +580,51 @@ cfFilterOptionsCreate(size_t num_options,   // I - Number of command-line option
   if ((value = get_option("number-up", num_options, options)) != NULL && (intvalue = atoi(value)) >= 1)
     ippo->number_up = intvalue;
 
+  if ((value = get_option("number-up-layout", num_options, options)) != NULL)
+  {
+    char first = (char)tolower((unsigned char)value[0]);
+    char second = (char)tolower((unsigned char)value[1]);
+    char third = (char)tolower((unsigned char)value[2]);
+    char fourth = (char)tolower((unsigned char)value[3]);
+    bool first_horizontal = (first == 'l' && second == 'r') ||
+                            (first == 'r' && second == 'l');
+    bool second_horizontal = (third == 'l' && fourth == 'r') ||
+                             (third == 'r' && fourth == 'l');
+    bool first_vertical = (first == 't' && second == 'b') ||
+                          (first == 'b' && second == 't');
+    bool second_vertical = (third == 't' && fourth == 'b') ||
+                           (third == 'b' && fourth == 't');
+    bool valid_layout = strlen(value) == 4 &&
+                        ((first_horizontal && second_vertical) ||
+                         (first_vertical && second_horizontal));
+
+    if (valid_layout)
+    {
+      cupsCopyString(ippo->number_up_layout, value, sizeof(ippo->number_up_layout));
+      for (char *layout = ippo->number_up_layout; *layout; layout ++)
+        *layout = (char)tolower((unsigned char)*layout);
+      ippo->number_up_layout_set = true;
+    }
+    else
+      fprintf(stderr, "cfFilterPDFToPDF: Unsupported number-up-layout %s, using number-up-layout=lrtb", value);
+  }
+
   if ((value = get_option("orientation-requested", num_options, options)) != NULL &&
     (intvalue = atoi(value), intvalue >= CF_FILTER_ORIENT_PORTRAIT && intvalue <= CF_FILTER_ORIENT_NONE))
   {
     ippo->orientation_requested = (cf_filter_orient_t)intvalue;
+  }
+
+  // Auto-rotate is the default when no orientation was requested.
+  ippo->pdf_auto_rotate = ippo->orientation_requested == CF_FILTER_ORIENT_NONE;
+  if ((value = get_option("pdftopdfAutoRotate", num_options, options)) == NULL)
+    value = get_option("pdfAutoRotate", num_options, options);
+  if (value)
+  {
+    ippo->pdf_auto_rotate = !(!strcasecmp(value, "false") ||
+                              !strcasecmp(value, "no") ||
+                              !strcasecmp(value, "off") ||
+                              !strcmp(value, "0"));
   }
 
   if ((value = get_option("output-bin", num_options, options)) != NULL)

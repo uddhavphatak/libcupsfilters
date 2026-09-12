@@ -204,6 +204,10 @@ typedef struct cf_filter_options_s	// All filter options in one structure
   cf_filter_handling_t multiple_document_handling;
 					// "multiple-document-handling" value
   int		number_up;		// "number-up" value
+  char		number_up_layout[5];
+					// "number-up-layout" value
+  bool		number_up_layout_set;
+					// Was "number-up-layout" provided?
   cf_filter_orient_t orientation_requested;	// "orientation-requested" value
   char		output_bin[128];	// "output-bin" value
   cups_array_t	*overrides;		// "overrides" value(s)
@@ -229,6 +233,8 @@ typedef struct cf_filter_options_s	// All filter options in one structure
                 page_right, page_bottom;
   char          page_label[256];       	// "page-label" value
   bool          pdf_auto_rotate;       	// "pdfAutoRotate" value
+  int           landscape_orientation_requested_preferred;
+					// Preferred landscape orientation: 4 or 5
   cf_filter_imgpos_t x_image_position;	// "x-image-position" value
   int		x_side1_image_shift,	// "x-side1-image-shift" or "x-image-shift" value
 		x_side2_image_shift;	// "x-side2-image-shift" or "x-image-shift" value
