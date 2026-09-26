@@ -716,13 +716,13 @@ prepare_number_up(xform_prepare_t *p)	// I - Preparation data
         strcpy(layout_order, "lrtb");
         break;
       case CF_FILTER_ORIENT_LANDSCAPE:
-        strcpy(layout_order, "tbrl");
+        strcpy(layout_order, "btlr");
         break;
       case CF_FILTER_ORIENT_REVERSE_PORTRAIT:
         strcpy(layout_order, "rlbt");
         break;
       case CF_FILTER_ORIENT_REVERSE_LANDSCAPE:
-        strcpy(layout_order, "lrbt");
+        strcpy(layout_order, "tbrl");
         break;
     }
   }
@@ -1986,7 +1986,8 @@ copy_page(xform_prepare_t *p,		// I - Preparation data
 		iwidth,			// Input page width
 		iheight,		// Input page height
 		scaling;		// Scaling factor
-  bool		rotate;			// Rotate 90 degrees?
+  int		angle;			// Counter-clockwise content rotation in degrees
+  double	rcos, rsin;		// Rotation cosine/sine
   pdfio_matrix_t cm;			// Cell transform matrix
   size_t	i,			// Looping var
 		count;			// Number of input page streams
@@ -2062,22 +2063,37 @@ copy_page(xform_prepare_t *p,		// I - Preparation data
   iwidth  = irect.x2 - irect.x1;
   iheight = irect.y2 - irect.y1;
 
-  if (p->options->pdf_auto_rotate &&
-      ((iwidth > iheight && cwidth < cheight) ||
-       (iwidth < iheight && cwidth > cheight)))
+  switch (p->options->orientation_requested)
   {
-    // Need to rotate...
-    rotate  = true;
+    case CF_FILTER_ORIENT_LANDSCAPE :
+        angle = 90;
+        break;
+    case CF_FILTER_ORIENT_REVERSE_LANDSCAPE :
+        angle = 270;
+        break;
+    case CF_FILTER_ORIENT_REVERSE_PORTRAIT :
+        angle = 180;
+        break;
+    case CF_FILTER_ORIENT_PORTRAIT :
+        angle = 0;
+        break;
+    default :
+        if (p->options->pdf_auto_rotate &&
+            ((iwidth > iheight && cwidth < cheight) ||
+             (iwidth < iheight && cwidth > cheight)))
+          angle = p->options->landscape_orientation_requested_preferred == 5 ? 90 : 270;
+        else
+          angle = 0;
+        break;
+  }
+
+  if (angle == 90 || angle == 270)
+  {
     iwidth  = irect.y2 - irect.y1;
     iheight = irect.x2 - irect.x1;
   }
-  else
-  {
-    // No rotation...
-    rotate = false;
-  }
 
-  fprintf(stderr, "DEBUG: iwidth=%g, iheight=%g, cwidth=%g, cheight=%g, rotate=%s\n", iwidth, iheight, cwidth, cheight, rotate ? "true" : "false");
+  fprintf(stderr, "DEBUG: iwidth=%g, iheight=%g, cwidth=%g, cheight=%g, angle=%d\n", iwidth, iheight, cwidth, cheight, angle);
 
   if (p->options->print_scaling == CF_FILTER_SCALING_NONE)
   {
@@ -2101,34 +2117,22 @@ copy_page(xform_prepare_t *p,		// I - Preparation data
     }
   }
 
- if (rotate && p->options->landscape_orientation_requested_preferred == 5)
+  switch (angle)
   {
-    cm[0][0] = 0.0;
-    cm[0][1] = scaling;
-    cm[1][0] = -scaling;
-    cm[1][1] = 0.0;
-    cm[2][0] = cell->x2 - 0.5 * (cwidth - iwidth * scaling);
-    cm[2][1] = cell->y1 + 0.5 * (cheight - iheight * scaling);
+    default :  rcos =  1.0; rsin =  0.0; break;
+    case 90 :  rcos =  0.0; rsin =  1.0; break;
+    case 180 : rcos = -1.0; rsin =  0.0; break;
+    case 270 : rcos =  0.0; rsin = -1.0; break;
   }
-  else if (rotate)
-  {
-    cm[0][0] = 0.0;
-    cm[0][1] = -scaling;
-    cm[1][0] = scaling;
-    cm[1][1] = 0.0;
-    cm[2][0] = cell->x1 + 0.5 * (cwidth - iwidth * scaling);
-    cm[2][1] = cell->y2 + 0.5 * (cheight - iheight * scaling);
-  }
-  else
-  {
-    cm[0][0] = scaling;
-    cm[0][1] = 0.0;
-    cm[1][0] = 0.0;
-    cm[1][1] = scaling;
-    cm[2][0] = cell->x1 + 0.5 * (cwidth - iwidth * scaling);
-    cm[2][1] = cell->y1 + 0.5 * (cheight - iheight * scaling);
-  }
- 
+
+  // Rotate/scale about the input page center, then center in the cell...
+  cm[0][0] = scaling * rcos;
+  cm[0][1] = scaling * rsin;
+  cm[1][0] = -scaling * rsin;
+  cm[1][1] = scaling * rcos;
+  cm[2][0] = 0.5 * (cell->x1 + cell->x2) - (cm[0][0] * 0.5 * (irect.x1 + irect.x2) + cm[1][0] * 0.5 * (irect.y1 + irect.y2));
+  cm[2][1] = 0.5 * (cell->y1 + cell->y2) - (cm[0][1] * 0.5 * (irect.x1 + irect.x2) + cm[1][1] * 0.5 * (irect.y1 + irect.y2));
+
 
   if (Verbosity)
     fprintf(stderr, "DEBUG: Page %u, cell %u/%u, cm=[%g %g %g %g %g %g], input=%p\n", (unsigned)(outpage - p->outpages + 1), (unsigned)layout + 1, (unsigned)p->num_layout, cm[0][0], cm[0][1], cm[1][0], cm[1][1], cm[2][0], cm[2][1], (void *)outpage->input[layout]);
