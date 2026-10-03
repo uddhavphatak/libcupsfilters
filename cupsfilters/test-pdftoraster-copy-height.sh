@@ -57,11 +57,23 @@ BIN="${WORKDIR}/test-pdftoraster-copy-height"
 RUN_LOG="${WORKDIR}/run.log"
 
 # Flags to compile the harness (it pulls in pdftoraster.c -> needs config.h, the
-# internal headers and pdftoraster.c's own dependencies).  Fall back to cups3.
-PKG_CFLAGS="$(pkg-config --cflags lcms2 pdfio cups 2>/dev/null \
-              || pkg-config --cflags lcms2 pdfio cups3 2>/dev/null || true)"
-PKG_LIBS="$(pkg-config --libs lcms2 pdfio cups 2>/dev/null \
-            || pkg-config --libs lcms2 pdfio cups3 2>/dev/null || true)"
+# internal headers and pdftoraster.c's own dependencies).
+if pkg-config --exists cups3; then
+  CUPS_PACKAGE=cups3
+elif pkg-config --exists cups; then
+  CUPS_PACKAGE=cups
+else
+  CUPS_PACKAGE=
+fi
+PKG_CFLAGS="$(pkg-config --cflags lcms2 pdfio)"
+PKG_LIBS="$(pkg-config --libs lcms2 pdfio)"
+if [[ -n "${CUPS_PACKAGE}" ]]; then
+  PKG_CFLAGS+=" $(pkg-config --cflags "${CUPS_PACKAGE}")"
+  PKG_LIBS+=" $(pkg-config --libs "${CUPS_PACKAGE}")"
+else
+  PKG_CFLAGS+=" $(cups-config --cflags)"
+  PKG_LIBS+=" $(cups-config --image --libs)"
+fi
 INCLUDES="-I${BUILD_ROOT} -I${BUILD_ROOT}/cupsfilters"
 
 # Compile the harness (which #includes the real pdftoraster.c) under ASan.

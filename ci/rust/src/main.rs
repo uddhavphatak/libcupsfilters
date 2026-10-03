@@ -23,7 +23,68 @@ const CUPS_FILTERS: (&str, &str, &str) = (
     "2.0.1",
     "5a73330fbd0cde494d984141f9add1565aef8171",
 );
+const CUPS_25: (&str, &str, &str) = (
+    "https://github.com/OpenPrinting/cups.git",
+    "master",
+    "112bb79c5386372f337013c6b526d051122e9dfb",
+);
+const CUPS_3: (&str, &str, &str) = (
+    "https://github.com/OpenPrinting/libcups.git",
+    "master",
+    "ab203c8bc157a4eb42bd04b2cc9bb69528edba88",
+);
 const OPTIONS: &str = "PageSize=A4 printer-resolution=600dpi copies=3";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CupsKind {
+    System2,
+    Source25,
+    Source3,
+}
+
+impl CupsKind {
+    fn parse(value: &str) -> Result<Self> {
+        match value {
+            "system-2x" => Ok(Self::System2),
+            "source-2.5.x" => Ok(Self::Source25),
+            "source-3.x" => Ok(Self::Source3),
+            _ => Err(format!("unknown CUPS_KIND: {value}").into()),
+        }
+    }
+
+    fn from_env() -> Result<Self> {
+        match env::var("CUPS_KIND") {
+            Ok(value) => Self::parse(&value),
+            Err(env::VarError::NotPresent) => Ok(Self::System2),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    fn accepts_version(self, version: &str) -> bool {
+        let version = version.trim();
+        match self {
+            Self::System2 => version.starts_with("2."),
+            Self::Source25 => version.strip_prefix("2.5").is_some_and(|suffix| {
+                suffix.is_empty()
+                    || suffix.starts_with('.')
+                    || suffix.starts_with('b')
+                    || suffix.starts_with("rc")
+            }),
+            Self::Source3 => version.starts_with("3."),
+        }
+    }
+}
+
+fn command_timeout(value: Option<&str>) -> Result<&str> {
+    let value = value.unwrap_or("30m");
+    let number = value
+        .strip_suffix(['s', 'm', 'h'])
+        .ok_or("CI_COMMAND_TIMEOUT must be a positive integer followed by s, m, or h")?;
+    if !number.bytes().all(|byte| byte.is_ascii_digit()) || number.parse::<u32>()? == 0 {
+        return Err("CI_COMMAND_TIMEOUT must be positive".into());
+    }
+    Ok(value)
+}
 
 struct Runner {
     root: PathBuf,
@@ -56,13 +117,38 @@ impl Runner {
     fn command(&self, program: &str, dir: &Path) -> Result<Command> {
         // GNU timeout owns the command's process group, including build children.
         let mut command = Command::new("timeout");
+        let timeout = match env::var("CI_COMMAND_TIMEOUT") {
+            Ok(value) => Some(value),
+            Err(env::VarError::NotPresent) => None,
+            Err(error) => return Err(error.into()),
+        };
         command
-            .args(["--kill-after=30s", "30m", program])
+            .args([
+                "--kill-after=30s",
+                command_timeout(timeout.as_deref())?,
+                program,
+            ])
             .current_dir(dir)
             .env("LC_ALL", "C")
             .env("DEBIAN_FRONTEND", "noninteractive")
             .env("NEEDRESTART_MODE", "a")
             .env("NEEDRESTART_SUSPEND", "1")
+            .env(
+                "PATH",
+                prepend_path(&[self.prefix.join("bin")], env::var_os("PATH"))?,
+            )
+            .env(
+                "LIBRARY_PATH",
+                prepend_path(&[self.prefix.join("lib")], env::var_os("LIBRARY_PATH"))?,
+            )
+            .env(
+                "LDFLAGS",
+                format!(
+                    "-L{} {}",
+                    self.prefix.join("lib").display(),
+                    env::var("LDFLAGS").unwrap_or_default()
+                ),
+            )
             .env(
                 "PKG_CONFIG_PATH",
                 prepend_path(
@@ -150,8 +236,6 @@ impl Runner {
             "autotools-dev",
             "git",
             "ca-certificates",
-            "libcups2-dev",
-            "libcupsimage2-dev",
             "libavahi-client-dev",
             "libssl-dev",
             "libpam-dev",
@@ -170,6 +254,9 @@ impl Runner {
             "poppler-utils",
             "ghostscript",
         ]);
+        if CupsKind::from_env()? == CupsKind::System2 {
+            install.args(["libcups2-dev", "libcupsimage2-dev"]);
+        }
         self.execute("deps-install", &mut install)
     }
 
@@ -177,13 +264,29 @@ impl Runner {
         fs::create_dir_all(&self.work)?;
         let source = self.work.join(name);
         if !source.exists() {
+            self.run(&format!("{name}-clone"), &self.work, "git", &["init", name])?;
+        }
+        if !self
+            .command("git", &source)?
+            .args(["cat-file", "-e", &format!("{}^{{commit}}", pin.2)])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()?
+            .success()
+        {
             self.run(
-                &format!("{name}-clone"),
-                &self.work,
+                &format!("{name}-fetch"),
+                &source,
                 "git",
-                &["clone", "--depth", "1", "--branch", pin.1, pin.0, name],
+                &["fetch", "--depth", "1", pin.0, pin.2],
             )?;
         }
+        self.run(
+            &format!("{name}-checkout"),
+            &source,
+            "git",
+            &["checkout", "--detach", pin.2],
+        )?;
         self.run(
             &format!("{name}-revision"),
             &source,
@@ -220,6 +323,10 @@ impl Runner {
                 "CUPS_DATADIR={}",
                 self.prefix.join("share/cups").display()
             ));
+            if name == "cups" {
+                // CUPS 3 skips host ldconfig when BUILDROOT is nonempty.
+                command.arg("BUILDROOT=/");
+            }
             self.execute(&format!("{name}-install"), &mut command)?;
         }
         Ok(())
@@ -230,7 +337,83 @@ impl Runner {
         self.build("pdfio", &source, &["--enable-shared"], true)
     }
 
+    fn cups(&self) -> Result<()> {
+        match CupsKind::from_env()? {
+            CupsKind::System2 => {}
+            CupsKind::Source25 => {
+                let source = self.checkout("cups", CUPS_25)?;
+                self.build("cups", &source, &["--with-components=libcups"], true)?;
+            }
+            CupsKind::Source3 => {
+                let source = self.checkout("cups", CUPS_3)?;
+                self.run(
+                    "cups-submodules",
+                    &source,
+                    "git",
+                    &[
+                        "submodule",
+                        "update",
+                        "--init",
+                        "--recursive",
+                        "--depth",
+                        "1",
+                    ],
+                )?;
+                self.build("cups", &source, &[], true)?;
+            }
+        }
+        self.verify_cups()
+    }
+
+    fn verify_cups(&self) -> Result<()> {
+        let kind = CupsKind::from_env()?;
+        let module = if kind == CupsKind::Source3 {
+            "cups3"
+        } else {
+            "cups"
+        };
+        let exists = self
+            .command("pkg-config", &self.root)?
+            .args(["--exists", module])
+            .status()?;
+        let use_pkg_config = exists.success();
+        if !use_pkg_config && kind != CupsKind::System2 {
+            return Err(format!("selected CUPS package {module} is missing").into());
+        }
+        if kind != CupsKind::Source3
+            && self
+                .command("pkg-config", &self.root)?
+                .args(["--exists", "cups3"])
+                .status()?
+                .success()
+        {
+            return Err("cups3 would override the selected CUPS 2 installation".into());
+        }
+        let (program, version_args, prefix_args) = if use_pkg_config {
+            (
+                "pkg-config",
+                vec!["--modversion", module],
+                vec!["--variable=prefix", module],
+            )
+        } else {
+            ("cups-config", vec!["--version"], vec!["--prefix"])
+        };
+        self.run("selected-cups-version", &self.root, program, &version_args)?;
+        let version = fs::read_to_string(self.results.join("selected-cups-version.log"))?;
+        if !kind.accepts_version(&version) {
+            return Err(format!("wrong CUPS version for {kind:?}: {}", version.trim()).into());
+        }
+        self.run("selected-cups-prefix", &self.root, program, &prefix_args)?;
+        let prefix = fs::read_to_string(self.results.join("selected-cups-prefix.log"))?;
+        let staged = Path::new(prefix.trim()) == self.prefix;
+        if staged != (kind != CupsKind::System2) {
+            return Err(format!("wrong CUPS prefix for {kind:?}: {}", prefix.trim()).into());
+        }
+        Ok(())
+    }
+
     fn library(&self) -> Result<()> {
+        self.verify_cups()?;
         self.build("libcupsfilters", &self.root, &[], true)?;
         self.run(
             "selected-libcupsfilters",
@@ -246,10 +429,26 @@ impl Runner {
     }
 
     fn consumers(&self) -> Result<()> {
+        if CupsKind::from_env()? == CupsKind::Source3 {
+            return Err("legacy consumer integration is only supported with CUPS 2".into());
+        }
+        let shim = self.prefix.join("bin/cups-config");
+        if CupsKind::from_env()? == CupsKind::Source25 {
+            fs::create_dir_all(self.prefix.join("bin"))?;
+            fs::copy(env::current_exe()?, &shim)?;
+        }
+        let compatibility = format!("--with-cups-config={}", shim.display());
+        let cups_args: &[&str] = if CupsKind::from_env()? == CupsKind::Source25 {
+            &[&compatibility]
+        } else {
+            &[]
+        };
         let libppd = self.checkout("libppd", LIBPPD)?;
-        self.build("libppd", &libppd, &[], true)?;
+        self.build("libppd", &libppd, cups_args, true)?;
         let filters = self.checkout("cups-filters", CUPS_FILTERS)?;
-        self.build("cups-filters", &filters, &["--disable-foomatic"], false)
+        let mut args = cups_args.to_vec();
+        args.push("--disable-foomatic");
+        self.build("cups-filters", &filters, &args, false)
     }
 
     fn filter(&self) -> Result<()> {
@@ -389,17 +588,80 @@ fn verify_linkage(linkage: &str, expected: &Path) -> Result<()> {
     Ok(())
 }
 
-fn main() -> Result<()> {
-    let runner = Runner::new()?;
-    let action = env::args_os().nth(1).ok_or(
-        "usage: libcupsfilters-ci <deps|pdfio|library|consumers|filter|check|autopkgtest>",
-    )?;
-    match action.to_str() {
-        Some("deps") => runner.deps(),
-        Some("pdfio") => runner.pdfio(),
-        Some("library") => runner.library(),
-        Some("consumers") => runner.consumers(),
-        Some("filter") => {
+fn pipeline(kind: CupsKind, mut run: impl FnMut(&str) -> Result<()>) -> Result<()> {
+    for stage in ["deps", "cups", "pdfio", "library"] {
+        run(stage)?;
+    }
+    let mut failures = Vec::new();
+    if kind != CupsKind::Source3 {
+        match run("consumers") {
+            Ok(()) => {
+                if let Err(error) = run("filter") {
+                    failures.push(format!("filter: {error}"));
+                }
+            }
+            Err(error) => failures.push(format!("consumers: {error}")),
+        }
+    }
+    if let Err(error) = run("check") {
+        failures.push(format!("check: {error}"));
+    }
+    if kind != CupsKind::Source3 {
+        if let Err(error) = run("autopkgtest") {
+            failures.push(format!("autopkgtest: {error}"));
+        }
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(failures.join("\n").into())
+    }
+}
+
+fn cups_config_option(option: &OsStr) -> Result<Option<&'static str>> {
+    match option.to_str() {
+        Some("--image") => Ok(None),
+        Some("--cflags") => Ok(Some("--cflags")),
+        Some("--libs") => Ok(Some("--libs")),
+        Some("--version") => Ok(Some("--modversion")),
+        Some("--datadir") => Ok(Some("--variable=cups_datadir")),
+        Some("--serverroot") => Ok(Some("--variable=cups_serverroot")),
+        Some("--serverbin") => Ok(Some("--variable=cups_serverbin")),
+        _ => Err(format!(
+            "unsupported cups-config option: {}",
+            option.to_string_lossy()
+        )
+        .into()),
+    }
+}
+
+fn cups_config() -> Result<()> {
+    // The pinned legacy consumers predate CUPS 2.5's switch to cups.pc.
+    let options = env::args_os()
+        .skip(1)
+        .map(|arg| cups_config_option(&arg))
+        .collect::<Result<Vec<_>>>()?;
+    if options.is_empty() {
+        return Err("cups-config requires an option".into());
+    }
+    for option in options.into_iter().flatten() {
+        let status = Command::new("pkg-config").args([option, "cups"]).status()?;
+        if !status.success() {
+            return Err(format!("pkg-config {option} cups failed: {status}").into());
+        }
+    }
+    Ok(())
+}
+
+fn run_action(runner: &Runner, action: &str) -> Result<()> {
+    match action {
+        "all" => pipeline(CupsKind::from_env()?, |stage| run_action(runner, stage)),
+        "deps" => runner.deps(),
+        "cups" => runner.cups(),
+        "pdfio" => runner.pdfio(),
+        "library" => runner.library(),
+        "consumers" => runner.consumers(),
+        "filter" => {
             let outcome = runner.filter();
             if let Some(summary) = env::var_os("GITHUB_STEP_SUMMARY") {
                 let status = if outcome.is_ok() { "PASS" } else { "FAIL" };
@@ -410,13 +672,13 @@ fn main() -> Result<()> {
             }
             outcome
         }
-        Some("check") => runner.run(
+        "check" => runner.run(
             "make-check",
             &runner.root,
             "make",
             &["check", "V=1", "VERBOSE=1"],
         ),
-        Some("autopkgtest") => runner.run(
+        "autopkgtest" => runner.run(
             "autopkgtest",
             &runner.root,
             "make",
@@ -424,10 +686,27 @@ fn main() -> Result<()> {
         ),
         _ => Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            format!("unknown action: {}", OsStr::new(&action).to_string_lossy()),
+            format!("unknown action: {action}"),
         )
         .into()),
     }
+}
+
+fn main() -> Result<()> {
+    if env::args_os()
+        .next()
+        .as_deref()
+        .and_then(|arg| Path::new(arg).file_name())
+        == Some(OsStr::new("cups-config"))
+    {
+        return cups_config();
+    }
+    CupsKind::from_env()?;
+    let runner = Runner::new()?;
+    let action = env::args().nth(1).ok_or(
+        "usage: libcupsfilters-ci <all|deps|cups|pdfio|library|consumers|filter|check|autopkgtest>",
+    )?;
+    run_action(&runner, &action)
 }
 
 #[cfg(test)]
@@ -436,6 +715,113 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
+
+    #[test]
+    fn validates_cups_modes_and_versions() {
+        assert_eq!(CupsKind::parse("system-2x").unwrap(), CupsKind::System2);
+        assert_eq!(CupsKind::parse("source-2.5.x").unwrap(), CupsKind::Source25);
+        assert_eq!(CupsKind::parse("source-3.x").unwrap(), CupsKind::Source3);
+        assert!(CupsKind::parse("source-4.x").is_err());
+        assert!(CupsKind::System2.accepts_version("2.4.16\n"));
+        assert!(CupsKind::Source25.accepts_version("2.5b1\n"));
+        assert!(CupsKind::Source3.accepts_version("3.0.4\n"));
+        assert!(!CupsKind::Source25.accepts_version("2.4.16"));
+        assert!(!CupsKind::Source25.accepts_version("2.50"));
+        assert!(!CupsKind::Source3.accepts_version("2.5b1"));
+    }
+
+    #[test]
+    fn pipeline_covers_each_cups_mode() {
+        for kind in [CupsKind::System2, CupsKind::Source25, CupsKind::Source3] {
+            let mut stages = Vec::new();
+            pipeline(kind, |stage| {
+                stages.push(stage.to_string());
+                Ok(())
+            })
+            .unwrap();
+            let expected = if kind == CupsKind::Source3 {
+                vec!["deps", "cups", "pdfio", "library", "check"]
+            } else {
+                vec![
+                    "deps",
+                    "cups",
+                    "pdfio",
+                    "library",
+                    "consumers",
+                    "filter",
+                    "check",
+                    "autopkgtest",
+                ]
+            };
+            assert_eq!(stages, expected);
+        }
+    }
+
+    #[test]
+    fn pipeline_retains_regression_tests_after_consumer_failure() {
+        let mut stages = Vec::new();
+        let result = pipeline(CupsKind::Source25, |stage| {
+            stages.push(stage.to_string());
+            if stage == "consumers" || stage == "check" {
+                Err(format!("{stage} failed").into())
+            } else {
+                Ok(())
+            }
+        });
+        assert!(result.is_err());
+        assert_eq!(
+            stages,
+            [
+                "deps",
+                "cups",
+                "pdfio",
+                "library",
+                "consumers",
+                "check",
+                "autopkgtest"
+            ]
+        );
+        let error = result.unwrap_err().to_string();
+        assert!(error.contains("consumers failed") && error.contains("check failed"));
+    }
+
+    #[test]
+    fn pipeline_stops_after_library_failure() {
+        let mut stages = Vec::new();
+        assert!(pipeline(CupsKind::System2, |stage| {
+            stages.push(stage.to_string());
+            if stage == "library" {
+                Err("library failed".into())
+            } else {
+                Ok(())
+            }
+        })
+        .is_err());
+        assert_eq!(stages, ["deps", "cups", "pdfio", "library"]);
+    }
+
+    #[test]
+    fn legacy_cups_config_maps_only_supported_options() {
+        assert_eq!(
+            cups_config_option(OsStr::new("--version")).unwrap(),
+            Some("--modversion")
+        );
+        assert_eq!(cups_config_option(OsStr::new("--image")).unwrap(), None);
+        assert_eq!(
+            cups_config_option(OsStr::new("--libs")).unwrap(),
+            Some("--libs")
+        );
+        assert!(cups_config_option(OsStr::new("--invalid")).is_err());
+    }
+
+    #[test]
+    fn validates_command_timeouts() {
+        assert_eq!(command_timeout(None).unwrap(), "30m");
+        assert_eq!(command_timeout(Some("180m")).unwrap(), "180m");
+        for value in ["", "0m", "-1m", "1.5h", "30", "30d"] {
+            assert!(command_timeout(Some(value)).is_err(), "{value}");
+        }
+    }
 
     struct TestDirectory(PathBuf);
 

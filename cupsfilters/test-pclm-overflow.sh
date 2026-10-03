@@ -7,16 +7,29 @@ LIBTOOL="${BUILD_ROOT}/libtool"
 CC="${CC:-cc}"
 SAN_FLAGS="${SAN_FLAGS:--fsanitize=address -fno-omit-frame-pointer}"
 
-# AddressSanitizer is what makes this test meaningful.  When libasan is not
-# installed the compiler still accepts -fsanitize=address but the link fails
-# (missing libasan_preinit.o / -lasan) -- that is an environment gap, not a
-# libcupsfilters bug.  Skip (Automake exit 77) instead of failing; a real
-# failure is reported only when ASan IS available and the sanitizer fires.
+CUPS_CFLAGS=()
+CUPS_LIBS=()
+if pkg-config --exists cups3; then
+  read -r -a CUPS_CFLAGS <<< "$(pkg-config --cflags cups3)"
+  read -r -a CUPS_LIBS <<< "$(pkg-config --libs cups3)"
+elif pkg-config --exists cups; then
+  read -r -a CUPS_CFLAGS <<< "$(pkg-config --cflags cups)"
+  read -r -a CUPS_LIBS <<< "$(pkg-config --libs cups)"
+else
+  read -r -a CUPS_CFLAGS <<< "$(cups-config --cflags)"
+  read -r -a CUPS_LIBS <<< "$(cups-config --image --libs)"
+fi
+
+# QEMU can link ASan but fail at runtime initialization.
+asan_probe="$(mktemp "${TMPDIR:-/tmp}/asan-probe.XXXXXX")"
 if ! printf 'int main(void){return 0;}\n' \
-     | "${CC}" ${SAN_FLAGS} -x c - -o /dev/null >/dev/null 2>&1; then
-  echo "AddressSanitizer not available (cannot link ${SAN_FLAGS}); skipping." >&2
+     | "${CC}" ${SAN_FLAGS} -x c - -o "${asan_probe}" >/dev/null 2>&1 \
+   || ! "${asan_probe}" >/dev/null 2>&1; then
+  echo "AddressSanitizer not usable in this environment; skipping." >&2
+  rm -f "${asan_probe}"
   exit 77
 fi
+rm -f "${asan_probe}"
 
 if [[ ! -x "${LIBTOOL}" ]]; then
   echo "libtool helper not found at ${LIBTOOL}" >&2
@@ -43,6 +56,7 @@ PWG_BIN="${TOOLS_DIR}/make_pwg"
 RUN_LOG="${WORKDIR}/trigger.log"
 
 cat > "${PWG_SRC}" <<'EOF'
+#include <cupsfilters/libcups2-private.h>
 #include <cups/raster.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -78,7 +92,7 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  cups_page_header2_t header;
+  cups_page_header_t header;
   memset(&header, 0, sizeof(header));
 
   header.HWResolution[0] = header.HWResolution[1] = 300;
@@ -100,7 +114,7 @@ int main(int argc, char **argv) {
   header.cupsColorSpace = CUPS_CSPACE_K;
   header.cupsCompression = 0; /* CUPS_COMPRESSION_NONE */
 
-  if (!cupsRasterWriteHeader2(ras, &header)) {
+  if (!cupsRasterWriteHeader(ras, &header)) {
     fprintf(stderr, "Failed to write PWG header.\n");
     cupsRasterClose(ras);
     close(fd);
@@ -132,7 +146,8 @@ int main(int argc, char **argv) {
 }
 EOF
 
-"${CC}" -std=c11 -O0 ${SAN_FLAGS} -o "${PWG_BIN}" "${PWG_SRC}" -lcups
+"${CC}" -std=c11 -O0 ${SAN_FLAGS} -I"${BUILD_ROOT}" "${CUPS_CFLAGS[@]}" \
+  -o "${PWG_BIN}" "${PWG_SRC}" "${CUPS_LIBS[@]}"
 "${PWG_BIN}" 1024 8000 "${INPUT_PWG}" >/dev/null
 
 cat > "${HARNESS_SRC}" <<'EOF'
@@ -216,11 +231,11 @@ int main(int argc, char **argv) {
 EOF
 
 "${LIBTOOL}" --mode=compile --tag=CC "${CC}" -std=c11 -O0 ${SAN_FLAGS} \
-  -I"${BUILD_ROOT}" -I"${BUILD_ROOT}/cupsfilters" \
+  -I"${BUILD_ROOT}" -I"${BUILD_ROOT}/cupsfilters" "${CUPS_CFLAGS[@]}" \
   -c "${HARNESS_SRC}" -o "${HARNESS_OBJ}" >/dev/null
 
 "${LIBTOOL}" --mode=link --tag=CC "${CC}" ${SAN_FLAGS} "${HARNESS_OBJ}" \
-  "${BUILD_ROOT}/libcupsfilters.la" -lcups -o "${HARNESS_BIN}" >/dev/null
+  "${BUILD_ROOT}/libcupsfilters.la" "${CUPS_LIBS[@]}" -o "${HARNESS_BIN}" >/dev/null
 
 : > "${RUN_LOG}"
 ASAN_OPTS="${ASAN_OPTIONS:-detect_leaks=0,abort_on_error=0}"

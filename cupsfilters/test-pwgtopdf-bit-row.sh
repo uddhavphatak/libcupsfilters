@@ -9,12 +9,12 @@ SAN_FLAGS="${SAN_FLAGS:--fsanitize=address -fno-omit-frame-pointer}"
 PKG_CFLAGS="$(pkg-config --cflags lcms2 pdfio 2>/dev/null || true)"
 PKG_LIBS="$(pkg-config --libs lcms2 pdfio 2>/dev/null || true)"
 
-if pkg-config --exists cups 2>/dev/null; then
-  PKG_CFLAGS+=" $(pkg-config --cflags cups)"
-  PKG_LIBS+=" $(pkg-config --libs cups)"
-elif pkg-config --exists cups3 2>/dev/null; then
+if pkg-config --exists cups3 2>/dev/null; then
   PKG_CFLAGS+=" $(pkg-config --cflags cups3)"
   PKG_LIBS+=" $(pkg-config --libs cups3)"
+elif pkg-config --exists cups 2>/dev/null; then
+  PKG_CFLAGS+=" $(pkg-config --cflags cups)"
+  PKG_LIBS+=" $(pkg-config --libs cups)"
 elif command -v cups-config >/dev/null 2>&1; then
   PKG_CFLAGS+=" $(cups-config --cflags)"
   PKG_LIBS+=" $(cups-config --libs)"

@@ -16,54 +16,84 @@ concurrency:
 
 jobs:
   printing:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    name: ${{ matrix.arch.name }} / ${{ matrix.cups }}
+    strategy:
+      fail-fast: false
+      matrix:
+        arch:
+          - name: x86_64
+            runner: ubuntu-latest
+            emulated: false
+          - name: arm64
+            runner: ubuntu-24.04-arm
+            emulated: false
+          - name: armv7
+            runner: ubuntu-latest
+            platform: linux/arm/v7
+            emulated: true
+          - name: riscv64
+            runner: ubuntu-latest
+            platform: linux/riscv64
+            emulated: true
+        cups: [system-2x, source-2.5.x, source-3.x]
+    runs-on: ${{ matrix.arch.runner }}
+    timeout-minutes: 360
     env:
       CC: /usr/bin/gcc
       RUSTUP_TOOLCHAIN: 1.85.1
+      CUPS_KIND: ${{ matrix.cups }}
+      CI_COMMAND_TIMEOUT: ${{ matrix.arch.emulated && '180m' || '30m' }}
     steps:
       - uses: actions/checkout@v4
 
       - name: Install pinned Rust toolchain
+        if: ${{ !matrix.arch.emulated }}
         run: rustup toolchain install 1.85.1 --profile minimal --component rustfmt --component clippy
 
-      - name: Validate and build Rust CI runner
-        working-directory: ci/rust
+      - name: Build and test natively
+        if: ${{ !matrix.arch.emulated }}
         run: |
+          cd ci/rust
           cargo fmt --check
           cargo test --locked
           cargo clippy --locked --all-targets -- -D warnings
           cargo build --locked
+          cd ../..
+          ci/rust/target/debug/libcupsfilters-ci all
 
-      - name: Install build dependencies
-        run: ci/rust/target/debug/libcupsfilters-ci deps
+      - name: Set up QEMU
+        if: ${{ matrix.arch.emulated }}
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm,riscv64
 
-      - name: Build pinned PDFio
-        run: ci/rust/target/debug/libcupsfilters-ci pdfio
-
-      - name: Build and stage this libcupsfilters checkout
-        id: library
-        run: ci/rust/target/debug/libcupsfilters-ci library
-
-      - name: Build pinned libppd and cups-filters
-        run: ci/rust/target/debug/libcupsfilters-ci consumers
-
-      - name: Run cups-filters pdftopdf smoke test
-        run: ci/rust/target/debug/libcupsfilters-ci filter
-
-      - name: Run existing regression tests
-        if: ${{ !cancelled() && steps.library.outcome == 'success' }}
-        run: ci/rust/target/debug/libcupsfilters-ci check
-
-      - name: Run staged consumer tests
-        if: ${{ !cancelled() && steps.library.outcome == 'success' }}
-        run: ci/rust/target/debug/libcupsfilters-ci autopkgtest
+      - name: Build and test under QEMU
+        if: ${{ matrix.arch.emulated }}
+        env:
+          CI_PLATFORM: ${{ matrix.arch.platform }}
+        run: |
+          docker run --rm --platform "$CI_PLATFORM" \
+            --volume "$GITHUB_WORKSPACE:/workspace" --workdir /workspace \
+            --env CC --env CUPS_KIND --env CI_COMMAND_TIMEOUT \
+            --env DEBIAN_FRONTEND=noninteractive \
+            debian:trixie \
+            bash -euc '
+              apt-get update
+              apt-get install -y ca-certificates cargo rustc rustfmt rust-clippy
+              cd ci/rust
+              cargo fmt --check
+              cargo test --locked
+              cargo clippy --locked --all-targets -- -D warnings
+              cargo build --locked
+              cd ../..
+              ci/rust/target/debug/libcupsfilters-ci all
+            '
 
       - name: Upload outputs and diagnostics
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: libcupsfilters-printing-${{ github.run_id }}-${{ github.run_attempt }}
+          name: libcupsfilters-printing-${{ matrix.arch.name }}-${{ matrix.cups }}-${{ github.run_id }}-${{ github.run_attempt }}
           retention-days: 14
           if-no-files-found: warn
           path: |
@@ -71,6 +101,7 @@ jobs:
             config.log
             test-suite.log
             cupsfilters/*.log
+            .ci-work/cups/config.log
             .ci-work/libppd/config.log
             .ci-work/cups-filters/config.log
           include-hidden-files: true

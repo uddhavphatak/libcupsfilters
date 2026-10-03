@@ -75,14 +75,41 @@ compatibility.
 
 ### cups-filters integration CI
 
-The build workflow runs on Ubuntu 24.04 with distribution CUPS 2.x.
+The build workflow runs a 12-job architecture/CUPS matrix on GitHub-hosted
+runners:
+
+| Architecture | Execution environment |
+| --- | --- |
+| x86_64 | Native `ubuntu-latest` |
+| arm64 | Native `ubuntu-24.04-arm` |
+| armv7 | QEMU `linux/arm/v7`, Debian Trixie container on `ubuntu-latest` |
+| riscv64 | QEMU `linux/riscv64`, Debian Trixie container on `ubuntu-latest` |
+
+Each architecture tests `system-2x` (distribution CUPS 2.x),
+`source-2.5.x` (pinned OpenPrinting/cups 2.5 development revision), and
+`source-3.x` (pinned OpenPrinting/libcups 3.x revision, including submodules).
+Native and emulated jobs therefore cover different distribution environments.
+The selected CUPS version and installation prefix are checked before building
+libcupsfilters. Source modes do not explicitly install system CUPS development
+packages or fall back to them.
+
 A standalone Rust runner in `ci/rust` installs build dependencies, builds
 PDFio 1.6.4, builds this libcupsfilters checkout, and builds pinned upstream
-libppd 2.1.1 and cups-filters 2.0.1 against it. Release commit IDs are checked
-before building. Unrelated legacy Foomatic filters are disabled.
+libppd 2.1.1 and cups-filters 2.0.1 against it on CUPS 2 legs. Commit IDs are
+checked before building. Unrelated legacy Foomatic filters are disabled.
 Dependencies are installed under `.ci-work/install`, not
 over the system libraries. Only the explicit `deps` command uses root/sudo
-to install Ubuntu packages. Normal library builds do not require Rust.
+to install distribution packages. Normal library builds do not require Rust.
+The `all` command orchestrates the stages in Rust. For CUPS 2.5, the runner
+also provides a Rust `cups-config` compatibility executable backed by
+`cups.pc` for the pinned legacy consumers, which still require that interface.
+
+All legs run `make check`. CUPS 2 legs additionally run the consumer smoke
+test and `make test-autopkgtest`; CUPS 3 legs omit those legacy integrations.
+Once the library builds, regression tests still run if consumer integration
+fails, and any failure makes the job fail. Matrix jobs use `fail-fast: false`.
+ASan-based regressions report Automake skips when the sanitizer cannot run
+under QEMU; they are not marked as expected failures.
 
 The initial smoke test reproduces this CUPS filter invocation, using a file
 as stdin rather than a `cat` pipeline:
@@ -106,7 +133,16 @@ To reproduce on Ubuntu with Rust installed, run from the repository root:
 
 ```sh
 cargo build --locked --manifest-path ci/rust/Cargo.toml
+# Select one mode; use a fresh checkout/work directory when changing modes.
+export CUPS_KIND=system-2x
+ci/rust/target/debug/libcupsfilters-ci all
+```
+
+Individual stages are also available:
+
+```sh
 ci/rust/target/debug/libcupsfilters-ci deps
+ci/rust/target/debug/libcupsfilters-ci cups
 ci/rust/target/debug/libcupsfilters-ci pdfio
 ci/rust/target/debug/libcupsfilters-ci library
 ci/rust/target/debug/libcupsfilters-ci consumers
@@ -115,20 +151,23 @@ ci/rust/target/debug/libcupsfilters-ci check
 ci/rust/target/debug/libcupsfilters-ci autopkgtest
 ```
 
-The workflow installs Rust 1.85.1; for local runner development, work inside
+Native jobs install Rust 1.85.1; emulated jobs use Debian Trixie's Rust,
+Cargo, rustfmt, and Clippy packages. For local runner development, work inside
 `ci/rust` to use its toolchain file. Run `cargo fmt --check`,
 `cargo test --locked`, and `cargo clippy --locked --all-targets -- -D warnings`.
 Each external build/filter command has a 30-minute timeout with a 30-second
-kill grace period.
+kill grace period. `CI_COMMAND_TIMEOUT` accepts positive integer durations
+with `s`, `m`, or `h` units; emulated jobs use `180m`. Each matrix job has
+a six-hour overall limit.
 
-Download the `libcupsfilters-printing-<run>-<attempt>` artifact from the
+Download the `libcupsfilters-printing-<arch>-<cups>-<run>-<attempt>` artifact from the
 workflow run. `ci-results/passthrough_3copies/` contains the actual PDF,
 page PNG previews, filter stderr, invocation details, library linkage, and
-test result. Setup/build logs are also retained, including on failure.
+test result on CUPS 2 legs. Setup/build logs are also retained for every
+mode, including on failure, for 14 days.
 Rerunning the smoke test truncates its PDF output rather than appending.
 
-This workflow replaces the architecture/CUPS-version build matrix; those
-compatibility checks are not currently covered. The older `ci/ci-setup.sh`
+The older `ci/ci-setup.sh`
 is no longer used by the build workflow. CodeQL and Cppcheck remain separate.
 
 ### CodeQL Static Analysis Configuration
