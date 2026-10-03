@@ -441,6 +441,10 @@ SUBDIRS =
 CIROOT = $(abs_top_builddir)/_ciroot
 
 EXTRA_DIST += \
+	ci/rust/Cargo.toml \
+	ci/rust/Cargo.lock \
+	ci/rust/rust-toolchain.toml \
+	ci/rust/src/main.rs \
 	ci/autopkgtest/run.sh \
 	ci/autopkgtest/debian-tests/control \
 	ci/autopkgtest/debian-tests/libcupsfilters-2-dev \

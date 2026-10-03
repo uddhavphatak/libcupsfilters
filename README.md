@@ -73,6 +73,64 @@ compatibility.
 
 ## DEVELOPMENT AND CI/CD
 
+### cups-filters integration CI
+
+The build workflow runs on Ubuntu 24.04 with distribution CUPS 2.x.
+A standalone Rust runner in `ci/rust` installs build dependencies, builds
+PDFio 1.6.4, builds this libcupsfilters checkout, and builds pinned upstream
+libppd 2.1.1 and cups-filters 2.0.1 against it. Release commit IDs are checked
+before building. Unrelated legacy Foomatic filters are disabled.
+Dependencies are installed under `.ci-work/install`, not
+over the system libraries. Only the explicit `deps` command uses root/sudo
+to install Ubuntu packages. Normal library builds do not require Rust.
+
+The initial smoke test reproduces this CUPS filter invocation, using a file
+as stdin rather than a `cat` pipeline:
+
+```sh
+CONTENT_TYPE=application/pdf FINAL_CONTENT_TYPE=application/pdf \
+LD_LIBRARY_PATH=.libs:/path/to/staged/lib \
+/path/to/cups-filters/.libs/pdftopdf 1 1 1 1 \
+'PageSize=A4 printer-resolution=600dpi copies=3' \
+< cupsfilters/test_files/test_file_4pg.pdf > passthrough_3copies.pdf
+```
+
+The runner checks the binary's resolved libcupsfilters path, its exit status,
+and that its output is a nonempty PDF with pages that Poppler can render.
+It does not yet assert copy count, page dimensions, or visual correctness.
+No PPD is supplied. This exercises the real cups-filters/libppd wrapper but
+does not yet submit jobs through cupsd or transmit them to a virtual printer.
+The existing filter harness remains unchanged.
+
+To reproduce on Ubuntu with Rust installed, run from the repository root:
+
+```sh
+cargo build --locked --manifest-path ci/rust/Cargo.toml
+ci/rust/target/debug/libcupsfilters-ci deps
+ci/rust/target/debug/libcupsfilters-ci pdfio
+ci/rust/target/debug/libcupsfilters-ci library
+ci/rust/target/debug/libcupsfilters-ci consumers
+ci/rust/target/debug/libcupsfilters-ci filter
+ci/rust/target/debug/libcupsfilters-ci check
+ci/rust/target/debug/libcupsfilters-ci autopkgtest
+```
+
+The workflow installs Rust 1.85.1; for local runner development, work inside
+`ci/rust` to use its toolchain file. Run `cargo fmt --check`,
+`cargo test --locked`, and `cargo clippy --locked --all-targets -- -D warnings`.
+Each external build/filter command has a 30-minute timeout with a 30-second
+kill grace period.
+
+Download the `libcupsfilters-printing-<run>-<attempt>` artifact from the
+workflow run. `ci-results/passthrough_3copies/` contains the actual PDF,
+page PNG previews, filter stderr, invocation details, library linkage, and
+test result. Setup/build logs are also retained, including on failure.
+Rerunning the smoke test truncates its PDF output rather than appending.
+
+This workflow replaces the architecture/CUPS-version build matrix; those
+compatibility checks are not currently covered. The older `ci/ci-setup.sh`
+is no longer used by the build workflow. CodeQL and Cppcheck remain separate.
+
 ### CodeQL Static Analysis Configuration
 
 This repository uses a custom GitHub Actions workflow for CodeQL static analysis located at `.github/workflows/static-analysis.yml`. To ensure accurate analysis and avoid conflicts with GitHub's default settings, the following repository configurations are required:
@@ -120,4 +178,3 @@ This repository uses a custom GitHub Actions workflow for CodeQL static analysis
 * [cups-filters 2020 (PDF)](https://ftp.pwg.org/pub/pwg/liaison/openprinting/presentations/cups-filters-ippusbxd-2020.pdf)
 * [cups-filters 2021 (PDF)](https://ftp.pwg.org/pub/pwg/liaison/openprinting/presentations/cups-filters-cups-snap-ipp-usb-and-more-2021.pdf)
 * [cups-filters 2022 (PDF)](https://ftp.pwg.org/pub/pwg/liaison/openprinting/presentations/cups-filters-cups-snap-ipp-usb-and-more-2022.pdf)
-
