@@ -353,9 +353,8 @@ impl Runner {
             .args(configure_args);
         self.execute(&format!("{name}-configure"), &mut configure)?;
 
-        // Compile using the CPU parallelism available to this VM or container.
-        let jobs = std::thread::available_parallelism()?.get().to_string();
-        self.run(&format!("{name}-build"), source, "make", &["-j", &jobs])?;
+        // Compile with plain make rather than requesting parallel build jobs.
+        self.run(&format!("{name}-build"), source, "make", &[])?;
 
         // Consumers such as cups-filters can be tested directly without installation.
         if install {
