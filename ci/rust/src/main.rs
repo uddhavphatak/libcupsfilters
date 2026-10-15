@@ -1,3 +1,6 @@
+//! CI entry flow: main -> run_action -> pipeline -> individual Runner stages.
+//! GitHub Actions prepares the VM/container and Rust toolchain before calling this runner.
+
 use std::env;
 use std::error::Error;
 use std::ffi::{OsStr, OsString};
@@ -8,31 +11,31 @@ use std::process::{Command, Stdio};
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
-const PDFIO: (&str, &str, &str) = (
-    "https://github.com/michaelrsweet/pdfio.git",
-    "v1.6.4",
-    "48b185c650e2e732eed260d63909f4ec68ac9353",
-);
-const LIBPPD: (&str, &str, &str) = (
-    "https://github.com/OpenPrinting/libppd.git",
-    "2.1.1",
-    "2b37a73c02126d1ba031270322b6c79034cc0d0f",
-);
-const CUPS_FILTERS: (&str, &str, &str) = (
-    "https://github.com/OpenPrinting/cups-filters.git",
-    "2.0.1",
-    "5a73330fbd0cde494d984141f9add1565aef8171",
-);
-const CUPS_25: (&str, &str, &str) = (
-    "https://github.com/OpenPrinting/cups.git",
-    "master",
-    "112bb79c5386372f337013c6b526d051122e9dfb",
-);
-const CUPS_3: (&str, &str, &str) = (
-    "https://github.com/OpenPrinting/libcups.git",
-    "master",
-    "ab203c8bc157a4eb42bd04b2cc9bb69528edba88",
-);
+struct RepositoryPin {
+    url: &'static str,
+    commit: &'static str,
+}
+
+const PDFIO_1_6_4: RepositoryPin = RepositoryPin {
+    url: "https://github.com/michaelrsweet/pdfio.git",
+    commit: "48b185c650e2e732eed260d63909f4ec68ac9353",
+};
+const LIBPPD_2_1_1: RepositoryPin = RepositoryPin {
+    url: "https://github.com/OpenPrinting/libppd.git",
+    commit: "2b37a73c02126d1ba031270322b6c79034cc0d0f",
+};
+const CUPS_FILTERS_2_0_1: RepositoryPin = RepositoryPin {
+    url: "https://github.com/OpenPrinting/cups-filters.git",
+    commit: "5a73330fbd0cde494d984141f9add1565aef8171",
+};
+const CUPS_25: RepositoryPin = RepositoryPin {
+    url: "https://github.com/OpenPrinting/cups.git",
+    commit: "112bb79c5386372f337013c6b526d051122e9dfb",
+};
+const CUPS_3: RepositoryPin = RepositoryPin {
+    url: "https://github.com/OpenPrinting/libcups.git",
+    commit: "ab203c8bc157a4eb42bd04b2cc9bb69528edba88",
+};
 const OPTIONS: &str = "PageSize=A4 printer-resolution=600dpi copies=3";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -43,6 +46,7 @@ enum CupsKind {
 }
 
 impl CupsKind {
+    // Convert the workflow's CUPS mode name into a supported configuration.
     fn parse(value: &str) -> Result<Self> {
         match value {
             "system-2x" => Ok(Self::System2),
@@ -52,6 +56,7 @@ impl CupsKind {
         }
     }
 
+    // Read CUPS_KIND, using distro CUPS 2 when the variable is absent.
     fn from_env() -> Result<Self> {
         match env::var("CUPS_KIND") {
             Ok(value) => Self::parse(&value),
@@ -60,6 +65,7 @@ impl CupsKind {
         }
     }
 
+    // Check that a detected CUPS version belongs to the requested release family.
     fn accepts_version(self, version: &str) -> bool {
         let version = version.trim();
         match self {
@@ -75,6 +81,7 @@ impl CupsKind {
     }
 }
 
+// Validate GNU timeout's duration argument, defaulting to 30 minutes.
 fn command_timeout(value: Option<&str>) -> Result<&str> {
     let value = value.unwrap_or("30m");
     let number = value
@@ -94,6 +101,7 @@ struct Runner {
 }
 
 impl Runner {
+    // Validate the repository root and locate dependency, installation, and log directories.
     fn new() -> Result<Self> {
         let root = env::current_dir()?.canonicalize()?;
         if !root
@@ -102,6 +110,7 @@ impl Runner {
         {
             return Err("run from the libcupsfilters repository root".into());
         }
+        // Dependencies are fetched here and installed privately rather than into /usr.
         let work = root.join(".ci-work");
         let prefix = work.join("install");
         let results = root.join("ci-results");
@@ -114,6 +123,7 @@ impl Runner {
         })
     }
 
+    // Prepare a timed subprocess with non-interactive settings and private dependency paths.
     fn command(&self, program: &str, dir: &Path) -> Result<Command> {
         // GNU timeout owns the command's process group, including build children.
         let mut command = Command::new("timeout");
@@ -122,6 +132,7 @@ impl Runner {
             Err(env::VarError::NotPresent) => None,
             Err(error) => return Err(error.into()),
         };
+        // Prefer our tools, linker inputs, and pkg-config metadata over system installations.
         command
             .args([
                 "--kill-after=30s",
@@ -160,6 +171,7 @@ impl Runner {
         Ok(command)
     }
 
+    // Prefer build-tree libcupsfilters and privately installed dependencies at runtime.
     fn library_path(&self) -> Result<OsString> {
         prepend_path(
             &[self.root.join(".libs"), self.prefix.join("lib")],
@@ -167,6 +179,7 @@ impl Runner {
         )
     }
 
+    // Capture a command's output in its stage log, then execute it and check its status.
     fn execute(&self, name: &str, command: &mut Command) -> Result<()> {
         let log = self.results.join(format!("{name}.log"));
         println!("=== {name}: {command:?}");
@@ -178,6 +191,7 @@ impl Runner {
         self.finish(name, command)
     }
 
+    // Execute a prepared command, record its exit status, and propagate failures.
     fn finish(&self, name: &str, command: &mut Command) -> Result<()> {
         let status = command.status()?;
         writeln!(
@@ -195,25 +209,32 @@ impl Runner {
         Ok(())
     }
 
+    // Combine command preparation, argument setup, logging, and execution for simple stages.
     fn run(&self, name: &str, dir: &Path, program: &str, args: &[&str]) -> Result<()> {
         self.execute(name, self.command(program, dir)?.args(args))
     }
 
-    fn deps(&self) -> Result<()> {
-        let root_user = Command::new("id").arg("-u").output()?;
-        if !root_user.status.success() {
+    // Install build tools, Git, development libraries, and PDF validation tools through apt.
+    fn install_dependencies(&self) -> Result<()> {
+        // Containers run as root; native runners need passwordless sudo.
+        let user_id = Command::new("id").arg("-u").output()?;
+        if !user_id.status.success() {
             return Err("cannot determine user ID for dependency installation".into());
         }
-        let privileged = String::from_utf8(root_user.stdout)?.trim() != "0";
-        let program = if privileged { "sudo" } else { "apt-get" };
+        let needs_sudo = String::from_utf8(user_id.stdout)?.trim() != "0";
+        let program = if needs_sudo { "sudo" } else { "apt-get" };
+
+        // Refresh package indexes before requesting dependencies.
         let mut update = self.command(program, &self.root)?;
-        if privileged {
+        if needs_sudo {
             update.args(["-n", "env", "DEBIAN_FRONTEND=noninteractive", "apt-get"]);
         }
         update.arg("update");
         self.execute("deps-update", &mut update)?;
+
+        // Explicitly pass non-interactive settings through sudo as well.
         let mut install = self.command(program, &self.root)?;
-        if privileged {
+        if needs_sudo {
             install.args([
                 "-n",
                 "env",
@@ -254,38 +275,43 @@ impl Runner {
             "poppler-utils",
             "ghostscript",
         ]);
+        // Source CUPS modes supply their own headers and libraries in the next stage.
         if CupsKind::from_env()? == CupsKind::System2 {
             install.args(["libcups2-dev", "libcupsimage2-dev"]);
         }
         self.execute("deps-install", &mut install)
     }
 
-    fn checkout(&self, name: &str, pin: (&str, &str, &str)) -> Result<PathBuf> {
+    // Fetch a dependency's pinned commit and return its verified source directory.
+    fn checkout(&self, name: &str, pin: RepositoryPin) -> Result<PathBuf> {
+        // Initialize a local repository instead of cloning an entire branch.
         fs::create_dir_all(&self.work)?;
         let source = self.work.join(name);
         if !source.exists() {
             self.run(&format!("{name}-clone"), &self.work, "git", &["init", name])?;
         }
-        if !self
+        // Reuse the pinned commit if a previous invocation already fetched it.
+        let commit_exists = self
             .command("git", &source)?
-            .args(["cat-file", "-e", &format!("{}^{{commit}}", pin.2)])
+            .args(["cat-file", "-e", &format!("{}^{{commit}}", pin.commit)])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status()?
-            .success()
-        {
+            .success();
+        if !commit_exists {
             self.run(
                 &format!("{name}-fetch"),
                 &source,
                 "git",
-                &["fetch", "--depth", "1", pin.0, pin.2],
+                &["fetch", "--depth", "1", pin.url, pin.commit],
             )?;
         }
+        // Detach HEAD so a moving upstream branch cannot change the selected source.
         self.run(
             &format!("{name}-checkout"),
             &source,
             "git",
-            &["checkout", "--detach", pin.2],
+            &["checkout", "--detach", pin.commit],
         )?;
         self.run(
             &format!("{name}-revision"),
@@ -293,11 +319,12 @@ impl Runner {
             "git",
             &["rev-parse", "HEAD"],
         )?;
+        // Verify the checkout before allowing configure or make to use it.
         let revision = fs::read_to_string(self.results.join(format!("{name}-revision.log")))?;
-        if revision.trim() != pin.2 {
+        if revision.trim() != pin.commit {
             return Err(format!(
                 "{name}: expected commit {}, found {}",
-                pin.2,
+                pin.commit,
                 revision.trim()
             )
             .into());
@@ -305,18 +332,32 @@ impl Runner {
         Ok(source)
     }
 
-    fn build(&self, name: &str, source: &Path, extra: &[&str], install: bool) -> Result<()> {
+    // Bootstrap, configure, and compile a project; optionally install it into our prefix.
+    fn build(
+        &self,
+        name: &str,
+        source: &Path,
+        configure_args: &[&str],
+        install: bool,
+    ) -> Result<()> {
+        // Generate configure and Makefile inputs when the project provides a bootstrap script.
         if source.join("autogen.sh").is_file() {
             self.run(&format!("{name}-autogen"), source, "./autogen.sh", &[])?;
         }
+
+        // Keep every source-built dependency in the same private installation tree.
         let mut configure = self.command("./configure", source)?;
         configure
             .arg(format!("--prefix={}", self.prefix.display()))
             .arg(format!("--libdir={}", self.prefix.join("lib").display()))
-            .args(extra);
+            .args(configure_args);
         self.execute(&format!("{name}-configure"), &mut configure)?;
+
+        // Compile using the CPU parallelism available to this VM or container.
         let jobs = std::thread::available_parallelism()?.get().to_string();
         self.run(&format!("{name}-build"), source, "make", &["-j", &jobs])?;
+
+        // Consumers such as cups-filters can be tested directly without installation.
         if install {
             let mut command = self.command("make", source)?;
             command.arg("install").arg(format!(
@@ -332,20 +373,25 @@ impl Runner {
         Ok(())
     }
 
-    fn pdfio(&self) -> Result<()> {
-        let source = self.checkout("pdfio", PDFIO)?;
+    // Fetch pinned PDFio and install its shared library for libcupsfilters.
+    fn build_pdfio(&self) -> Result<()> {
+        let source = self.checkout("pdfio", PDFIO_1_6_4)?;
         self.build("pdfio", &source, &["--enable-shared"], true)
     }
 
-    fn cups(&self) -> Result<()> {
+    // Use distro CUPS 2 or build the selected pinned CUPS source, then verify selection.
+    fn prepare_cups(&self) -> Result<()> {
         match CupsKind::from_env()? {
+            // The dependency stage already installed the distro development packages.
             CupsKind::System2 => {}
             CupsKind::Source25 => {
+                // Build only libcups rather than the full CUPS server.
                 let source = self.checkout("cups", CUPS_25)?;
                 self.build("cups", &source, &["--with-components=libcups"], true)?;
             }
             CupsKind::Source3 => {
                 let source = self.checkout("cups", CUPS_3)?;
+                // CUPS 3 also needs the source dependencies recorded in its submodules.
                 self.run(
                     "cups-submodules",
                     &source,
@@ -365,6 +411,7 @@ impl Runner {
         self.verify_cups()
     }
 
+    // Reject a CUPS version or installation prefix that differs from the requested mode.
     fn verify_cups(&self) -> Result<()> {
         let kind = CupsKind::from_env()?;
         let module = if kind == CupsKind::Source3 {
@@ -372,6 +419,7 @@ impl Runner {
         } else {
             "cups"
         };
+        // Source builds require pkg-config metadata; distro CUPS 2 may use cups-config.
         let exists = self
             .command("pkg-config", &self.root)?
             .args(["--exists", module])
@@ -380,6 +428,7 @@ impl Runner {
         if !use_pkg_config && kind != CupsKind::System2 {
             return Err(format!("selected CUPS package {module} is missing").into());
         }
+        // Prevent cups3 metadata from overriding a deliberately selected CUPS 2 build.
         if kind != CupsKind::Source3
             && self
                 .command("pkg-config", &self.root)?
@@ -398,6 +447,7 @@ impl Runner {
         } else {
             ("cups-config", vec!["--version"], vec!["--prefix"])
         };
+        // Validate the release family first, then distinguish system and private prefixes.
         self.run("selected-cups-version", &self.root, program, &version_args)?;
         let version = fs::read_to_string(self.results.join("selected-cups-version.log"))?;
         if !kind.accepts_version(&version) {
@@ -412,9 +462,11 @@ impl Runner {
         Ok(())
     }
 
-    fn library(&self) -> Result<()> {
+    // Build the checked-out libcupsfilters and verify its installed pkg-config selection.
+    fn build_libcupsfilters(&self) -> Result<()> {
         self.verify_cups()?;
         self.build("libcupsfilters", &self.root, &[], true)?;
+        // Downstream consumers must discover this installation, not a distro copy.
         self.run(
             "selected-libcupsfilters",
             &self.root,
@@ -428,33 +480,42 @@ impl Runner {
         Ok(())
     }
 
-    fn consumers(&self) -> Result<()> {
-        if CupsKind::from_env()? == CupsKind::Source3 {
+    // Install pinned libppd, then build pinned cups-filters for CUPS 2 integration testing.
+    fn build_consumers(&self) -> Result<()> {
+        let kind = CupsKind::from_env()?;
+        if kind == CupsKind::Source3 {
             return Err("legacy consumer integration is only supported with CUPS 2".into());
         }
+        // Older consumers expect cups-config, which source CUPS 2.5 no longer provides.
+        // Copy this executable under that name to activate main's compatibility branch.
         let shim = self.prefix.join("bin/cups-config");
-        if CupsKind::from_env()? == CupsKind::Source25 {
+        if kind == CupsKind::Source25 {
             fs::create_dir_all(self.prefix.join("bin"))?;
             fs::copy(env::current_exe()?, &shim)?;
         }
         let compatibility = format!("--with-cups-config={}", shim.display());
-        let cups_args: &[&str] = if CupsKind::from_env()? == CupsKind::Source25 {
+        let cups_args: &[&str] = if kind == CupsKind::Source25 {
             &[&compatibility]
         } else {
             &[]
         };
-        let libppd = self.checkout("libppd", LIBPPD)?;
+        // cups-filters needs the installed libppd headers and library.
+        let libppd = self.checkout("libppd", LIBPPD_2_1_1)?;
         self.build("libppd", &libppd, cups_args, true)?;
-        let filters = self.checkout("cups-filters", CUPS_FILTERS)?;
-        let mut args = cups_args.to_vec();
-        args.push("--disable-foomatic");
-        self.build("cups-filters", &filters, &args, false)
+
+        // Leave cups-filters in its build tree; the next stage runs its pdftopdf binary.
+        let filters = self.checkout("cups-filters", CUPS_FILTERS_2_0_1)?;
+        let mut configure_args = cups_args.to_vec();
+        configure_args.push("--disable-foomatic");
+        self.build("cups-filters", &filters, &configure_args, false)
     }
 
+    // Clear old smoke-test outputs and record PASS or FAIL for the current invocation.
     fn filter(&self) -> Result<()> {
         let case = self.results.join("passthrough_3copies");
         fs::create_dir_all(&case)?;
         clear_case(&case)?;
+        // Record failures too, so a previous successful result cannot remain misleadingly.
         let outcome = self.filter_output(&case);
         let result = match &outcome {
             Ok(()) => "PASS: valid nonempty PDF and rendered previews".to_string(),
@@ -464,6 +525,7 @@ impl Runner {
         outcome
     }
 
+    // Run pdftopdf against our library, validate its PDF, and render page previews.
     fn filter_output(&self, case: &Path) -> Result<()> {
         // Libtool wrappers may overwrite LD_LIBRARY_PATH. Use the actual ELF binary.
         let binary = self.work.join("cups-filters/.libs/pdftopdf");
@@ -472,6 +534,7 @@ impl Runner {
         } else {
             self.work.join("cups-filters/pdftopdf")
         };
+        // Confirm the consumer loads build-tree libcupsfilters rather than a system copy.
         self.run("pdftopdf-linkage", &self.root, "ldd", &[path_str(&binary)?])?;
         let linkage = fs::read_to_string(self.results.join("pdftopdf-linkage.log"))?;
         verify_linkage(&linkage, &self.root.join(".libs"))?;
@@ -479,6 +542,7 @@ impl Runner {
             self.results.join("pdftopdf-linkage.log"),
             case.join("linkage.log"),
         )?;
+        // Preserve the exact invocation beside the output to make failures reproducible.
         let input = self.root.join("cupsfilters/test_files/test_file_4pg.pdf");
         let output = case.join("passthrough_3copies.pdf");
         fs::write(
@@ -488,6 +552,8 @@ impl Runner {
                 binary.display(), input.display(), self.library_path()?
             ),
         )?;
+        // Feed the fixture through stdin and capture PDF output separately from diagnostics.
+        // Clear inherited printer settings so this is a printer-independent PDF test.
         let mut command = self.command(path_str(&binary)?, &self.root)?;
         command
             .args(["1", "1", "1", "1", OPTIONS])
@@ -499,6 +565,7 @@ impl Runner {
             .stdout(File::create(&output)?)
             .stderr(File::create(case.join("filter.log"))?);
         self.finish("pdftopdf", &mut command)?;
+        // This smoke test checks nonempty, readable PDF output, not copy count or layout.
         if fs::metadata(&output)?.len() == 0 {
             return Err("pdftopdf produced an empty output".into());
         }
@@ -508,6 +575,7 @@ impl Runner {
             return Err("pdftopdf produced a PDF without pages".into());
         }
         fs::write(case.join("pdfinfo.txt"), info)?;
+        // Render every output page at 72 dpi for downloadable visual inspection.
         self.run(
             "preview",
             &self.root,
@@ -523,6 +591,7 @@ impl Runner {
     }
 }
 
+// Remove known smoke-test artifacts while preserving unrelated files in the case directory.
 fn clear_case(case: &Path) -> Result<()> {
     for entry in fs::read_dir(case)? {
         let entry = entry?;
@@ -544,11 +613,13 @@ fn clear_case(case: &Path) -> Result<()> {
     Ok(())
 }
 
+// Convert a filesystem path for string-based command arguments, rejecting invalid UTF-8.
 fn path_str(path: &Path) -> Result<&str> {
     path.to_str()
         .ok_or_else(|| "path is not valid UTF-8".into())
 }
 
+// Prepend search directories without discarding existing entries or OS-native path encoding.
 fn prepend_path(paths: &[PathBuf], existing: Option<OsString>) -> Result<OsString> {
     let mut entries = paths.to_vec();
     if let Some(existing) = existing {
@@ -557,6 +628,7 @@ fn prepend_path(paths: &[PathBuf], existing: Option<OsString>) -> Result<OsStrin
     Ok(env::join_paths(entries)?)
 }
 
+// Extract the page count from pdfinfo output, rejecting missing or malformed values.
 fn page_count(info: &str) -> Result<usize> {
     let pages = info
         .lines()
@@ -565,6 +637,7 @@ fn page_count(info: &str) -> Result<usize> {
     Ok(pages.trim().parse()?)
 }
 
+// Check that ldd resolved libcupsfilters inside the expected library directory.
 fn verify_linkage(linkage: &str, expected: &Path) -> Result<()> {
     let actual = linkage
         .lines()
@@ -577,6 +650,7 @@ fn verify_linkage(linkage: &str, expected: &Path) -> Result<()> {
             }
         })
         .ok_or("ldd did not resolve libcupsfilters")?;
+    // Resolve symlinks before comparing directories so the actual library location is checked.
     let actual = Path::new(actual).canonicalize()?;
     if actual.parent() != Some(expected.canonicalize()?.as_path()) {
         return Err(format!(
@@ -588,12 +662,18 @@ fn verify_linkage(linkage: &str, expected: &Path) -> Result<()> {
     Ok(())
 }
 
+// Run all stages in dependency order, stopping setup failures but collecting test failures.
 fn pipeline(kind: CupsKind, mut run: impl FnMut(&str) -> Result<()>) -> Result<()> {
-    for stage in ["deps", "cups", "pdfio", "library"] {
-        run(stage)?;
-    }
+    // Later stages require all dependency and library builds to succeed.
+    run("deps")?; // Install Git, build tools, development libraries, and PDF tools.
+    run("cups")?; // Provide and verify the selected CUPS installation.
+    run("pdfio")?; // Fetch, build, and install PDFio.
+    run("library")?; // Build and install this libcupsfilters checkout.
+
     let mut failures = Vec::new();
-    if kind != CupsKind::Source3 {
+    // Legacy consumers support CUPS 2 only; run the filter only if they build successfully.
+    let supports_legacy_consumers = kind != CupsKind::Source3;
+    if supports_legacy_consumers {
         match run("consumers") {
             Ok(()) => {
                 if let Err(error) = run("filter") {
@@ -603,14 +683,17 @@ fn pipeline(kind: CupsKind, mut run: impl FnMut(&str) -> Result<()>) -> Result<(
             Err(error) => failures.push(format!("consumers: {error}")),
         }
     }
+    // Retain regression results even when consumer integration fails.
     if let Err(error) = run("check") {
         failures.push(format!("check: {error}"));
     }
-    if kind != CupsKind::Source3 {
+    // Exercise the staged installation with downstream tests on supported CUPS 2 modes.
+    if supports_legacy_consumers {
         if let Err(error) = run("autopkgtest") {
             failures.push(format!("autopkgtest: {error}"));
         }
     }
+    // Return one combined error after all applicable regression stages have been attempted.
     if failures.is_empty() {
         Ok(())
     } else {
@@ -618,6 +701,7 @@ fn pipeline(kind: CupsKind, mut run: impl FnMut(&str) -> Result<()>) -> Result<(
     }
 }
 
+// Translate legacy cups-config options to pkg-config; ignore the obsolete --image modifier.
 fn cups_config_option(option: &OsStr) -> Result<Option<&'static str>> {
     match option.to_str() {
         Some("--image") => Ok(None),
@@ -635,6 +719,7 @@ fn cups_config_option(option: &OsStr) -> Result<Option<&'static str>> {
     }
 }
 
+// Emulate the cups-config interface required by pinned consumers using CUPS 2.5 metadata.
 fn cups_config() -> Result<()> {
     // The pinned legacy consumers predate CUPS 2.5's switch to cups.pc.
     let options = env::args_os()
@@ -644,6 +729,7 @@ fn cups_config() -> Result<()> {
     if options.is_empty() {
         return Err("cups-config requires an option".into());
     }
+    // Forward each supported query and leave its stdout available to the calling configure.
     for option in options.into_iter().flatten() {
         let status = Command::new("pkg-config").args([option, "cups"]).status()?;
         if !status.success() {
@@ -653,16 +739,18 @@ fn cups_config() -> Result<()> {
     Ok(())
 }
 
+// Dispatch a CLI action to the full pipeline or a single independently invocable stage.
 fn run_action(runner: &Runner, action: &str) -> Result<()> {
     match action {
         "all" => pipeline(CupsKind::from_env()?, |stage| run_action(runner, stage)),
-        "deps" => runner.deps(),
-        "cups" => runner.cups(),
-        "pdfio" => runner.pdfio(),
-        "library" => runner.library(),
-        "consumers" => runner.consumers(),
+        "deps" => runner.install_dependencies(),
+        "cups" => runner.prepare_cups(),
+        "pdfio" => runner.build_pdfio(),
+        "library" => runner.build_libcupsfilters(),
+        "consumers" => runner.build_consumers(),
         "filter" => {
             let outcome = runner.filter();
+            // Publish a short artifact pointer when GitHub provides a step-summary file.
             if let Some(summary) = env::var_os("GITHUB_STEP_SUMMARY") {
                 let status = if outcome.is_ok() { "PASS" } else { "FAIL" };
                 writeln!(
@@ -692,7 +780,10 @@ fn run_action(runner: &Runner, action: &str) -> Result<()> {
     }
 }
 
+// Start the CI runner, or act as the cups-config compatibility shim when invoked by that name.
 fn main() -> Result<()> {
+    // 1. Handle the renamed executable used by legacy consumers of source CUPS 2.5.
+    // This mode answers configuration queries without initializing the CI workspace.
     if env::args_os()
         .next()
         .as_deref()
@@ -701,11 +792,19 @@ fn main() -> Result<()> {
     {
         return cups_config();
     }
+    // 2. Reject an unsupported CUPS_KIND before creating any runner directories.
     CupsKind::from_env()?;
+
+    // 3. Validate the repository root and prepare the build/install/log locations.
     let runner = Runner::new()?;
+
+    // 4. Read "all" or a single stage name from the command line.
     let action = env::args().nth(1).ok_or(
         "usage: libcupsfilters-ci <all|deps|cups|pdfio|library|consumers|filter|check|autopkgtest>",
     )?;
+    
+    // 5. Dispatch the action; "all" enters pipeline for deps -> cups -> pdfio -> library
+    // followed by consumer integration and the tests applicable to the selected CUPS mode.
     run_action(&runner, &action)
 }
 
@@ -716,6 +815,7 @@ mod tests {
 
     static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
 
+    // Verify supported CUPS mode names and release-family matching.
     #[test]
     fn validates_cups_modes_and_versions() {
         assert_eq!(CupsKind::parse("system-2x").unwrap(), CupsKind::System2);
@@ -730,6 +830,7 @@ mod tests {
         assert!(!CupsKind::Source3.accepts_version("2.5b1"));
     }
 
+    // Verify the complete stage order for every supported CUPS configuration.
     #[test]
     fn pipeline_covers_each_cups_mode() {
         for kind in [CupsKind::System2, CupsKind::Source25, CupsKind::Source3] {
@@ -757,6 +858,7 @@ mod tests {
         }
     }
 
+    // Verify consumer build failures skip the filter but retain and aggregate regression results.
     #[test]
     fn pipeline_retains_regression_tests_after_consumer_failure() {
         let mut stages = Vec::new();
@@ -785,21 +887,56 @@ mod tests {
         assert!(error.contains("consumers failed") && error.contains("check failed"));
     }
 
+    // Verify a failed PDF smoke test does not prevent either regression suite from running.
     #[test]
-    fn pipeline_stops_after_library_failure() {
+    fn pipeline_retains_regression_tests_after_filter_failure() {
         let mut stages = Vec::new();
-        assert!(pipeline(CupsKind::System2, |stage| {
+        let result = pipeline(CupsKind::System2, |stage| {
             stages.push(stage.to_string());
-            if stage == "library" {
-                Err("library failed".into())
+            if stage == "filter" {
+                Err("filter failed".into())
             } else {
                 Ok(())
             }
-        })
-        .is_err());
-        assert_eq!(stages, ["deps", "cups", "pdfio", "library"]);
+        });
+
+        assert!(result.unwrap_err().to_string().contains("filter failed"));
+        assert_eq!(
+            stages,
+            [
+                "deps",
+                "cups",
+                "pdfio",
+                "library",
+                "consumers",
+                "filter",
+                "check",
+                "autopkgtest"
+            ]
+        );
     }
 
+    // Verify each required setup failure stops the pipeline before dependent stages.
+    #[test]
+    fn pipeline_stops_after_required_stage_failure() {
+        let required_stages = ["deps", "cups", "pdfio", "library"];
+        for (index, failed_stage) in required_stages.iter().enumerate() {
+            let mut stages = Vec::new();
+            let result = pipeline(CupsKind::System2, |stage| {
+                stages.push(stage.to_string());
+                if stage == *failed_stage {
+                    Err(format!("{stage} failed").into())
+                } else {
+                    Ok(())
+                }
+            });
+
+            assert!(result.is_err(), "{failed_stage}");
+            assert_eq!(stages, required_stages[..=index], "{failed_stage}");
+        }
+    }
+
+    // Verify compatibility option translation, ignored modifiers, and unsupported-option errors.
     #[test]
     fn legacy_cups_config_maps_only_supported_options() {
         assert_eq!(
@@ -814,6 +951,7 @@ mod tests {
         assert!(cups_config_option(OsStr::new("--invalid")).is_err());
     }
 
+    // Verify default and explicit timeouts, rejecting zero and malformed durations.
     #[test]
     fn validates_command_timeouts() {
         assert_eq!(command_timeout(None).unwrap(), "30m");
@@ -826,6 +964,7 @@ mod tests {
     struct TestDirectory(PathBuf);
 
     impl TestDirectory {
+        // Create a uniquely named temporary directory owned by one test.
         fn new() -> Self {
             let path = env::temp_dir().join(format!(
                 "libcupsfilters-ci-test-{}-{}",
@@ -838,11 +977,13 @@ mod tests {
     }
 
     impl Drop for TestDirectory {
+        // Remove only this test's owned temporary directory when it goes out of scope.
         fn drop(&mut self) {
             fs::remove_dir_all(&self.0).expect("clean up owned test directory");
         }
     }
 
+    // Verify page-count parsing accepts valid pdfinfo output and rejects invalid output.
     #[test]
     fn reads_page_count() {
         assert_eq!(page_count("Title: test\nPages:          12\n").unwrap(), 12);
@@ -850,6 +991,7 @@ mod tests {
         assert!(page_count("Title: test\n").is_err());
     }
 
+    // Verify private search paths precede, rather than replace, existing system paths.
     #[test]
     fn prepends_search_paths() {
         let result = prepend_path(
@@ -866,6 +1008,7 @@ mod tests {
         );
     }
 
+    // Verify linkage validation rejects absent and unresolved libcupsfilters entries.
     #[test]
     fn rejects_missing_library() {
         assert!(verify_linkage(
@@ -876,6 +1019,7 @@ mod tests {
         assert!(verify_linkage("libcupsfilters.so.2 => not found\n", Path::new(".")).is_err());
     }
 
+    // Verify linkage validation accepts only a library resolved in the expected directory.
     #[test]
     fn rejects_system_library() {
         let root = env::current_dir().unwrap();
@@ -885,6 +1029,7 @@ mod tests {
         assert!(verify_linkage(&linkage, executable.parent().unwrap()).is_ok());
     }
 
+    // Verify case cleanup removes stale generated outputs but keeps unrelated user files.
     #[test]
     fn clears_previous_results_but_preserves_other_files() {
         let directory = TestDirectory::new();
@@ -903,6 +1048,7 @@ mod tests {
         assert!(directory.0.join("notes.txt").exists());
     }
 
+    // Verify unsuccessful commands return errors and retain output and exit-status logs.
     #[test]
     fn command_failures_are_logged_and_propagated() {
         let directory = TestDirectory::new();
@@ -919,6 +1065,7 @@ mod tests {
             .contains("exit status: 1"));
     }
 
+    // Verify a timed-out subprocess is recorded as a failed stage.
     #[test]
     fn timed_out_commands_fail() {
         let directory = TestDirectory::new();
@@ -941,6 +1088,7 @@ mod tests {
             .contains("exit status: 124"));
     }
 
+    // Verify a missing filter replaces a stale PASS with FAIL and retains linkage diagnostics.
     #[test]
     fn missing_filter_replaces_stale_success_with_failure() {
         let directory = TestDirectory::new();
