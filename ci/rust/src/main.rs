@@ -802,7 +802,7 @@ fn main() -> Result<()> {
     let action = env::args().nth(1).ok_or(
         "usage: libcupsfilters-ci <all|deps|cups|pdfio|library|consumers|filter|check|autopkgtest>",
     )?;
-    
+
     // 5. Dispatch the action; "all" enters pipeline for deps -> cups -> pdfio -> library
     // followed by consumer integration and the tests applicable to the selected CUPS mode.
     run_action(&runner, &action)
